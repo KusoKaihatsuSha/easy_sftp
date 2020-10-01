@@ -8,9 +8,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/pkg/sftp"
-	. "github.com/ulvham/helper"
-	"golang.org/x/crypto/ssh"
 	"io"
 	"io/ioutil"
 	"log"
@@ -18,6 +15,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+
+	"github.com/pkg/sftp"
+	. "github.com/ulvham/helper"
+	"golang.org/x/crypto/ssh"
 
 	//"reflect"
 	"regexp"
@@ -43,6 +44,7 @@ type Cred struct {
 	SepSymbol     string
 	Logs          []string
 	Debug         bool
+	Salt          string
 }
 
 type CredObj interface {
@@ -52,6 +54,7 @@ type CredObj interface {
 }
 
 func (obj *Cred) Init() {
+	obj.Salt = srand(10, 10, true)
 	flag.BoolVar(&obj.Move, "m", false, "Accept values: copy or move. If value is empty => copy")
 	flag.StringVar(&obj.Login, "u", "user", "Accept values: exist user sftp login. If value is empty => user")
 	flag.StringVar(&obj.Password, "p", "password", "Accept values: exist user sftp pass. If value is empty => password")
@@ -65,9 +68,6 @@ func (obj *Cred) Init() {
 	flag.StringVar(&obj.SepSymbol, "symbol", "@", "Accept values: path to folder with logs.  If value is empty => logs off")
 	flag.BoolVar(&obj.Debug, "debug", false, "Accept values: true or false for more logs.  If value is empty => false")
 	flag.Parse()
-	//
-	//obj.Debug = false
-	//
 	if strings.Trim(obj.Port, " ") != "" {
 		obj.Port = ":" + obj.Port
 	}
@@ -79,13 +79,13 @@ func (obj *Cred) Init() {
 }
 
 func (obj *Cred) ToLogs(text string) {
-	obj.Logs = append(obj.Logs, text)
+	obj.Logs = append(obj.Logs, obj.Salt+":"+text)
 	p(text)
 }
 
 func (obj *Cred) SaveLogs() {
 	if strings.Trim(obj.PathLogs, "") != "" {
-		f, _ := os.OpenFile(obj.PathLogs+"logs.txt", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+		f, _ := os.OpenFile(obj.PathLogs+"logs"+time.Now().Format("_2006_01")+".txt", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
 		defer f.Close()
 		log.SetOutput(f)
 		for _, text := range obj.Logs {
@@ -113,15 +113,14 @@ type SftpObj interface {
 }
 
 func (obj *Sftp) Init() bool {
+
 	pathFromServer := ""
 	pathToServer := ""
 	pathFromServer, obj.Cred.PathFrom = separate(obj.Cred.PathFrom, obj.Cred.SepSymbol)
 	pathToServer, obj.Cred.PathTo = separate(obj.Cred.PathTo, obj.Cred.SepSymbol)
 	if pathFromServer != pathToServer && pathFromServer != "" && pathToServer != "" {
 		err := errors.New("two different sftp server? sorry, but need one")
-		if obj.Cred.Debug {
-			obj.Cred.ToLogs(err.Error())
-		}
+		obj.Cred.ToLogs(err.Error())
 		panic(err)
 		return false
 	} else {
@@ -136,9 +135,7 @@ func (obj *Sftp) Init() bool {
 	}
 	if pathFromServer == "" && pathToServer == "" {
 		err := errors.New("SFTP server not found in flags")
-		if obj.Cred.Debug {
-			obj.Cred.ToLogs(err.Error())
-		}
+		obj.Cred.ToLogs(err.Error())
 		return false
 		//panic(err)
 	}
@@ -178,13 +175,13 @@ func (obj *Sftp) RemoveFile(path string, isserver bool) bool {
 	if isserver {
 		err := obj.Client.Remove(path)
 		if err != nil {
-			obj.Cred.ToLogs(err.Error())
+			//obj.Cred.ToLogs(err.Error())
 			return false
 		}
 	} else {
 		err := os.Remove(path)
 		if err != nil {
-			obj.Cred.ToLogs(err.Error())
+			//obj.Cred.ToLogs(err.Error())
 			return false
 		}
 	}
@@ -195,33 +192,30 @@ func (obj *Sftp) RenameFile(pathfrom string, pathto string, isserver bool) bool 
 
 	var err error
 	if isserver {
-		_, errr := obj.Client.Stat(pathto)
-		if errr == nil {
-			if !obj.RemoveFile(pathto, isserver) {
-				obj.Cred.ToLogs("Error deleting file - " + pathto)
-				return false
-			}
-		}
 		err = obj.Client.Rename(pathfrom, pathto)
 	} else {
-		_, errr := os.Stat(pathto)
-		if errr == nil {
-			if !obj.RemoveFile(pathto, isserver) {
-				obj.Cred.ToLogs("Error deleting file - " + pathto)
-				return false
-			}
-		}
 		err = os.Rename(pathfrom, pathto)
 	}
 	if err != nil {
 		obj.Cred.ToLogs(err.Error())
-		if !obj.RemoveFile(pathfrom, isserver) {
-			obj.Cred.ToLogs("Error deleting file - " + pathfrom)
-			return false
-		}
 		return false
 	}
 	return true
+}
+
+func (obj *Sftp) CheckFile(path string, server bool) bool {
+	if server {
+		_, errr := obj.Client.Stat(path)
+		if errr == nil {
+			return true
+		}
+	} else {
+		_, errr := os.Stat(path)
+		if errr == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (obj *Sftp) CheckHash(path string, server bool) string {
@@ -229,13 +223,19 @@ func (obj *Sftp) CheckHash(path string, server bool) string {
 	hfile := sha256.New()
 
 	if server {
-		file, _ := obj.Client.Open(path)
-		io.Copy(hfile, file)
-		closeFile(file)
+		file, _ := obj.Client.OpenFile(path, os.O_RDONLY)
+		if obj.CheckFile(path, server) {
+			io.Copy(hfile, file)
+			closeFile(file)
+		}
+
 	} else {
-		file, _ := os.Open(path)
-		io.Copy(hfile, file)
-		closeFile(file)
+		file, _ := os.OpenFile(path, os.O_RDONLY, 0664)
+		//, os.O_WRONLY|os.O_CREATE|os.O_TRUNC
+		if obj.CheckFile(path, server) {
+			io.Copy(hfile, file)
+			closeFile(file)
+		}
 	}
 	return hex.EncodeToString(hfile.Sum(nil))
 }
@@ -253,6 +253,7 @@ type File struct {
 	NameTmp     string
 	Size        int64
 	Hash        string
+	DateMod     time.Time
 	AfterCopy   *FileRet
 }
 
@@ -263,6 +264,7 @@ type FileRet struct {
 	Name        string
 	NameTmp     string
 	Size        int64
+	DateMod     time.Time
 	Hash        string
 }
 
@@ -310,8 +312,102 @@ func (obj *Scan) Init() {
 	//---
 }
 
+func (obj *Scan) FileLockStat() (bool, time.Time) {
+	str1 := "~~~!!!d!!!~~~"
+	str2 := "~~~!!!o!!!~~~"
+	if obj.Server.SftpIsDest {
+		f, errr := obj.Server.Client.Stat(obj.Server.Cred.PathTo + str1)
+		if errr == nil {
+			return true, f.ModTime()
+		}
+	} else {
+		f, errr := os.Stat(obj.Server.Cred.PathTo + str1)
+		if errr == nil {
+			return true, f.ModTime()
+		}
+	}
+
+	if obj.Server.SftpIsOrigin {
+		f, errr := obj.Server.Client.Stat(obj.Server.Cred.PathFrom + str2)
+		if errr == nil {
+			return true, f.ModTime()
+		}
+	} else {
+		f, errr := os.Stat(obj.Server.Cred.PathFrom + str2)
+		if errr == nil {
+			return true, f.ModTime()
+		}
+	}
+	return false, time.Now()
+}
+
+func (obj *Scan) Lock() {
+	for {
+		if fls, t := obj.FileLockStat(); fls {
+			p(time.Since(t).Round(1*time.Second).Seconds(), time.Since(t).Round(1*time.Second).Seconds() > 3600)
+			if time.Since(t).Round(1*time.Second).Seconds() > 3600 {
+				obj.Unlock()
+			}
+		} else {
+			break
+		}
+		time.Sleep(5 * time.Second)
+	}
+
+	str1 := "~~~!!!d!!!~~~"
+	str2 := "~~~!!!o!!!~~~"
+	if fls, _ := obj.FileLockStat(); !fls {
+		if obj.Server.SftpIsDest {
+			file, err := obj.Server.Client.Create(obj.Server.Cred.PathTo + str1)
+			defer file.Close()
+			if err != nil {
+				p(err)
+			}
+
+		} else {
+			file, err := os.Create(obj.Server.Cred.PathTo + str1)
+			//file, err := os.OpenFile(obj.Server.Cred.PathTo+str1, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0664)
+			defer file.Close()
+			if err != nil {
+				p(err)
+			}
+		}
+		if obj.Server.SftpIsOrigin {
+			file, err := obj.Server.Client.Create(obj.Server.Cred.PathFrom + str2)
+			defer file.Close()
+			if err != nil {
+				p(err)
+			}
+		} else {
+			file, err := os.Create(obj.Server.Cred.PathFrom + str2)
+			//file, err := os.OpenFile(obj.Server.Cred.PathTo+str1, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0664)
+			defer file.Close()
+			if err != nil {
+				p(err)
+			}
+		}
+	}
+}
+
+func (obj *Scan) Unlock() {
+	str1 := "~~~!!!d!!!~~~"
+	str2 := "~~~!!!o!!!~~~"
+	if fls, _ := obj.FileLockStat(); fls {
+		if obj.Server.SftpIsDest {
+			obj.Server.RemoveFile(obj.Server.Cred.PathTo+str1, obj.Server.SftpIsDest)
+		} else {
+			obj.Server.RemoveFile(obj.Server.Cred.PathTo+str1, obj.Server.SftpIsDest)
+		}
+		if obj.Server.SftpIsOrigin {
+			obj.Server.RemoveFile(obj.Server.Cred.PathFrom+str2, obj.Server.SftpIsOrigin)
+		} else {
+			obj.Server.RemoveFile(obj.Server.Cred.PathFrom+str2, obj.Server.SftpIsOrigin)
+		}
+	}
+}
+
 func (obj *Scan) New() {
-	obj.Init()
+
 	obj.FilesOrigin = make(map[string]*File)
 	re := regexp.MustCompile(obj.Server.Cred.FindMask)
 	if obj.Server.SftpIsOrigin {
@@ -335,6 +431,7 @@ func (obj *Scan) New() {
 			}
 			var f File
 			f.Fullname = w.Path()
+			f.DateMod = w.Stat().ModTime()
 			f.Name = w.Stat().Name()
 			f.Size = w.Stat().Size()
 			f.Hash = obj.Server.CheckHash(w.Path(), true)
@@ -363,6 +460,7 @@ func (obj *Scan) New() {
 			var f File
 			f.Fullname = path
 			f.Name = info.Name()
+			f.DateMod = info.ModTime()
 			f.Size = info.Size()
 			f.Hash = obj.Server.CheckHash(path, false)
 			f.ServerSide = false
@@ -378,38 +476,57 @@ func (obj *Scan) New() {
 
 func (obj *Scan) CopyFile(ff interface{}) bool {
 	f := ff.(*File)
+
+	if obj.Server.CheckFile(obj.Server.Cred.PathFrom+f.Name, obj.Server.SftpIsOrigin) {
+		if obj.Coping(f) {
+			return true
+		}
+	}
+	return false
+}
+
+func (obj *Scan) Coping(f *File) bool {
 	var input []byte
 	var err error
 	if obj.Server.SftpIsOrigin {
 		file, err := obj.Server.Client.Open(f.Fullname)
 		if err != nil {
-			obj.Server.Cred.ToLogs(err.Error())
+			//obj.Server.Cred.ToLogs(err.Error())
+			//obj.S.Bad++
+			return false
 		}
 		scanner := bufio.NewReader(file)
 		input, err = ioutil.ReadAll(scanner)
 		if err != nil {
-			obj.Server.Cred.ToLogs(err.Error())
+			//obj.Server.Cred.ToLogs(err.Error())
+			//obj.S.Bad++
+			return false
 		}
 	} else {
 		input, err = ioutil.ReadFile(f.Fullname)
 		if err != nil {
-			obj.Server.Cred.ToLogs(err.Error())
+			//obj.Server.Cred.ToLogs(err.Error())
+			//obj.S.Bad++
+			return false
 		}
 	}
 	nn := addTimeStr(f.Name, obj.Server.Cred.TimeStamp)
 	if obj.Server.SftpIsDest {
 		obj.Server.Client.MkdirAll(obj.Server.Cred.PathTo + "/")
 		//file, _ := obj.Server.Client.Create(obj.Server.Cred.PathTo + "/" + addTimeStr(f.Name, obj.Server.Cred.TimeStamp))
-		file, err := obj.Server.Client.Create(obj.Server.Cred.PathTo + "/" + srand(20, 20, true))
+		//file, err := obj.Server.Client.Create(obj.Server.Cred.PathTo + "/" + srand(20, 20, true))
+		//file, err := obj.Server.Client.Create(obj.Server.Cred.PathTo + "/" + nn + "__" + srand(20, 20, true))
+		//file, err := obj.Server.Client.Create(obj.Server.Cred.PathTo + "/" + nn)
+		file, err := obj.Server.Client.OpenFile(obj.Server.Cred.PathTo+"/"+nn, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 		if err != nil {
-			obj.Server.Cred.ToLogs(err.Error())
-			obj.S.Bad++
+			//obj.Server.Cred.ToLogs(err.Error())
+			//obj.S.Bad++
 			return false
 		}
 		_, err = file.Write(input)
 		if err != nil {
-			obj.Server.Cred.ToLogs(err.Error())
-			obj.S.Bad++
+			//obj.Server.Cred.ToLogs(err.Error())
+			//obj.S.Bad++
 			return false
 		} else {
 			var nf FileRet
@@ -422,22 +539,31 @@ func (obj *Scan) CopyFile(ff interface{}) bool {
 			nf.ServerSide = true
 			nf.Hash = obj.Server.CheckHash(obj.Server.Cred.PathTo+"/"+nf_stet.Name(), true)
 			f.AfterCopy = &nf
+
+			err = obj.Server.Client.Chtimes(obj.Server.Cred.PathTo+"/"+nf_stet.Name(), f.DateMod, f.DateMod)
+			if err != nil {
+				//	fmt.Println(err)
+			}
 		}
 		closeFile(file)
+
 	} else {
 		//file, _ := os.Create(obj.Server.Cred.PathTo + "/" + addTimeStr(f.Name, obj.Server.Cred.TimeStamp))
 		os.MkdirAll(obj.Server.Cred.PathTo+"/", 755)
-		file, err := os.Create(obj.Server.Cred.PathTo + "/" + srand(20, 20, true))
+		//file, err := os.Create(obj.Server.Cred.PathTo + "/" + srand(20, 20, true))
+		//file, err := os.Create(obj.Server.Cred.PathTo + "/" + nn + "__" + srand(20, 20, true))
+		//file, err := os.Create(obj.Server.Cred.PathTo + "/" + nn)
+		file, err := os.OpenFile(obj.Server.Cred.PathTo+"/"+nn, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0664)
 		if err != nil {
-			obj.Server.Cred.ToLogs(err.Error())
-			obj.S.Bad++
+			//obj.Server.Cred.ToLogs(err.Error())
+			//obj.S.Bad++
 			return false
 		}
 		_, err = file.Write(input)
 		//err = ioutil.WriteFile(obj.Server.Cred.PathTo+"/"+addTimeStr(f.Name, obj.Server.Cred.TimeStamp), input, 0644)
 		if err != nil {
-			obj.Server.Cred.ToLogs(err.Error())
-			obj.S.Bad++
+			//obj.Server.Cred.ToLogs(err.Error())
+			//obj.S.Bad++
 			return false
 		} else {
 			var nf FileRet
@@ -450,39 +576,85 @@ func (obj *Scan) CopyFile(ff interface{}) bool {
 			nf.ServerSide = false
 			nf.Hash = obj.Server.CheckHash(obj.Server.Cred.PathTo+"/"+nf_stet.Name(), false)
 			f.AfterCopy = &nf
+
+			err = os.Chtimes(obj.Server.Cred.PathTo+"/"+nf_stet.Name(), f.DateMod, f.DateMod)
+			if err != nil {
+				//obj.Server.Cred.ToLogs(err.Error())
+			}
 		}
 		closeFile(file)
+
 	}
-	if f.Hash == f.AfterCopy.Hash && obj.Server.Cred.Move && f.Size == f.AfterCopy.Size {
-		if obj.Server.RenameFile(f.AfterCopy.FullnameTmp, f.AfterCopy.Fullname, obj.Server.SftpIsDest) {
-			if !obj.Server.RemoveFile(f.Fullname, f.ServerSide) {
-				obj.Server.Cred.ToLogs("Error deleting file - " + f.Fullname)
-				obj.S.Bad++
-				return false
-			}
-			return true
-		}
+	if f.Hash == f.AfterCopy.Hash && f.Size == f.AfterCopy.Size {
+		return true
 	}
+	//obj.Server.Cred.ToLogs("[-]" + f.Name + "->" + f.AfterCopy.Name + "[" + ByteCountDecimal(f.AfterCopy.Size) + "/" + ByteCountDecimal(f.Size) + "]")
+	return false
+}
+
+func (obj *Scan) Renaming(f *File) bool {
 	if f.Hash == f.AfterCopy.Hash && f.Size == f.AfterCopy.Size {
 		if obj.Server.RenameFile(f.AfterCopy.FullnameTmp, f.AfterCopy.Fullname, obj.Server.SftpIsDest) {
 			return true
 		}
 	}
-	obj.S.Bad++
+	obj.Server.Cred.ToLogs("Error Rename")
+	return false
+}
+
+func (obj *Scan) Cleaning(f *File) (bool, string) {
+	if f.Hash == f.AfterCopy.Hash && obj.Server.Cred.Move && f.Size == f.AfterCopy.Size {
+		if !obj.Server.RemoveFile(f.Fullname, f.ServerSide) {
+			return false, "Error deleting file"
+		}
+	}
+	return true, ""
+}
+
+func (obj *Scan) RenamingError(f *File) bool {
+	if f.Hash != f.AfterCopy.Hash || f.Size != f.AfterCopy.Size {
+		if obj.Server.RenameFile(f.AfterCopy.FullnameTmp, f.AfterCopy.Fullname+"_error_", obj.Server.SftpIsDest) {
+			return true
+		}
+	}
+	obj.Server.Cred.ToLogs("Error Rename")
 	return false
 }
 
 func (obj *Scan) Statistic(res_ interface{}) {
 	result := res_.(Result)
-	if obj.Server.Cred.Debug {
-		obj.Server.Cred.ToLogs(result.job.element.(*File).Name + "->" + result.job.element.(*File).AfterCopy.Name + "[" + ToStr(result.job.element.(*File).Hash == result.job.element.(*File).AfterCopy.Hash) + "]")
-	}
 	obj.S.Count++
-	if result.job.element.(*File).Hash == result.job.element.(*File).AfterCopy.Hash {
-		obj.S.Good++
+	if result.job.element.(*File).AfterCopy != nil {
+		if result.job.element.(*File).Hash == result.job.element.(*File).AfterCopy.Hash && result.job.element.(*File).Size == result.job.element.(*File).AfterCopy.Size {
+
+			if val, add_ := obj.Cleaning(result.job.element.(*File)); val {
+				obj.Server.Cred.ToLogs("[+]" + result.job.element.(*File).Name + "->" + result.job.element.(*File).AfterCopy.Name + "[" + ByteCountDecimal(result.job.element.(*File).AfterCopy.Size) + "/" + ByteCountDecimal(result.job.element.(*File).Size) + "]")
+				obj.S.Good++
+			} else {
+				obj.Server.Cred.ToLogs("[-]" + result.job.element.(*File).Name + "->" + result.job.element.(*File).AfterCopy.Name + "[" + ByteCountDecimal(result.job.element.(*File).AfterCopy.Size) + "/" + ByteCountDecimal(result.job.element.(*File).Size) + "]" + add_)
+				obj.S.Bad++
+			}
+		} else {
+			obj.Server.Cred.ToLogs("[-]" + result.job.element.(*File).Name + "->" + result.job.element.(*File).AfterCopy.Name + "[" + ByteCountDecimal(result.job.element.(*File).AfterCopy.Size) + "/" + ByteCountDecimal(result.job.element.(*File).Size) + "]")
+			obj.S.Bad++
+		}
 	} else {
+		obj.Server.Cred.ToLogs("[-]" + result.job.element.(*File).Name + "->NULL " + "[" + " 0 /" + ByteCountDecimal(result.job.element.(*File).Size) + "]")
 		obj.S.Bad++
 	}
+}
+
+func ByteCountDecimal(b int64) string {
+	const unit = 1000
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "kMGTPE"[exp])
 }
 
 func (obj *Scan) FillWorkers() map[string]*File {
@@ -570,6 +742,7 @@ func (obj *FabricWorkers) result() {
 }
 
 func (obj *Scan) Copy() {
+	obj.Server.Cred.ToLogs(">---------------------------------------->")
 	work := new(FabricWorkers)
 	work.startTime = time.Now()
 	work.init()
@@ -582,7 +755,7 @@ func (obj *Scan) Copy() {
 	obj.Server.Cred.ToLogs("Total Count: " + ToStr(obj.S.Count) + "")
 	obj.Server.Cred.ToLogs("Count good: " + ToStr(obj.S.Good) + "")
 	obj.Server.Cred.ToLogs("Count bad: " + ToStr(obj.S.Bad) + "")
-	//obj.Server.Cred.ToLogs("If bad and good > Total => exist eqval file in destination folder")
+	obj.Server.Cred.ToLogs("<----------------------------------------<")
 	obj.Server.Cred.SaveLogs()
 }
 
@@ -654,8 +827,15 @@ func srand(min, max int, readable bool) string {
 
 func main() {
 	scan := new(Scan)
+	scan.Init()
+
+	//scan.Lock()
 	scan.New()
 	scan.Copy()
+	//scan.Unlock()
+
+	//scan.Server.Client.Wait()
+
 	//scan.Statistic()
 
 }
