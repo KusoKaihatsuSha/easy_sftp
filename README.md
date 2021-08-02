@@ -1,4 +1,4 @@
-# easy_sftp
+# Easy SFTP
 
 A program by console interaction with graceful sftp
 
