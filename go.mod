@@ -1,4 +1,4 @@
-module easy_sftp
+module github.com/KusoKaihatsuSha/easy_sftp
 
 go 1.18
 
