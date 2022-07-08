@@ -1,3 +1,5 @@
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![godoc](https://godoc.org/github.com/KusoKaihatsuSha/easy_sftp?status.svg)](https://godoc.org/github.com/KusoKaihatsuSha/easy_sftp) [![Go Report Card](https://goreportcard.com/badge/github.com/KusoKaihatsuSha/easy_sftp)](https://goreportcard.com/report/github.com/KusoKaihatsuSha/easy_sftp)
+
 # SFTP CLI client
 
 > App for synchronized data between servers using CLI through SFTP client.
